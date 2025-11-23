@@ -8,10 +8,7 @@ from flask import Flask, request, jsonify, render_template
 from werkzeug.utils import secure_filename
 from flask_cors import CORS
 
-load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise EnvironmentError("Please set GEMINI_API_KEY in your .env file.")
+load_dotenv()  # keep it but don't read secrets at import-time
 
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
@@ -19,22 +16,23 @@ app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = '/tmp'
 app.config['MAX_CONTENT_LENGTH'] = 15 * 1024 * 1024
 
+def get_gemini_key():
+    key = os.getenv("GEMINI_API_KEY")
+    return key  # can be None if not set
+
 def clean_json(text_output):
-    # Remove markdown code fences like ```json  ``` or ```JSON  ```
     cleaned = re.sub(r"```(?:json|JSON)?", "", text_output).strip()
     cleaned = cleaned.replace("```", "").strip()
-
-    # Extract JSON object only
     match = re.search(r"\{.*\}", cleaned, re.DOTALL)
     if not match:
         raise ValueError("No valid JSON object found.")
-    
-    json_str = match.group()
-
-    # Return the JSON string for later parsing
-    return json_str
+    return match.group()
 
 def identify_lab_equipment_from_bytes(image_bytes, mime_type="image/jpeg"):
+    GEMINI_API_KEY = get_gemini_key()
+    if not GEMINI_API_KEY:
+        return {"error": "GEMINI_API_KEY not set in environment."}
+
     image_base64 = base64.b64encode(image_bytes).decode("utf-8")
 
     headers = {"Content-Type": "application/json"}
@@ -89,7 +87,6 @@ PROMPT = (
     "4) Provide ways to improve temperature regulation (max 20 words per suggestion). "
     "Output strictly valid JSON—no explanations, no extra text. Keep all responses very concise."
 )
-
 
 @app.route('/')
 def index():
