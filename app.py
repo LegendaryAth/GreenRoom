@@ -1,131 +1,84 @@
+# setup.py - robust, import-safe version resolution for builds
 import os
-import base64
-import requests
-import json
 import re
-from dotenv import load_dotenv
-from flask import Flask, request, jsonify, render_template
-from werkzeug.utils import secure_filename
-from flask_cors import CORS
+from pathlib import Path
+from setuptools import setup, find_packages
 
-load_dotenv()  # keep it but don't read secrets at import-time
+def get_version(package_name="your_package"):
+    """
+    Try to obtain version reliably at build-time without importing the package.
+    Order:
+      1) parse __version__ from package/__init__.py
+      2) read VERSION file at repo root
+      3) read SETUPTOOLS_SCM_PRETEND_VERSION env var (useful in CI)
+    """
+    root = Path(__file__).parent.resolve()
 
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    # 1) parse from package __init__.py
+    init_path = root / package_name / "__init__.py"
+    if init_path.exists():
+        text = init_path.read_text(encoding="utf8")
+        m = re.search(r"^__version__\s*=\s*['\"]([^'\"]+)['\"]", text, re.M)
+        if m:
+            return m.group(1)
 
-app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = '/tmp'
-app.config['MAX_CONTENT_LENGTH'] = 15 * 1024 * 1024
+    # 2) fallback to VERSION file in repo root
+    version_file = root / "VERSION"
+    if version_file.exists():
+        version = version_file.read_text(encoding="utf8").strip()
+        if version:
+            return version
 
-def get_gemini_key():
-    key = os.getenv("GEMINI_API_KEY")
-    return key  # can be None if not set
+    # 3) fallback to env var (useful in CI/Render when .git is missing)
+    env_version = os.environ.get("SETUPTOOLS_SCM_PRETEND_VERSION") or os.environ.get("PROJECT_VERSION")
+    if env_version:
+        return env_version
 
-def clean_json(text_output):
-    cleaned = re.sub(r"```(?:json|JSON)?", "", text_output).strip()
-    cleaned = cleaned.replace("```", "").strip()
-    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if not match:
-        raise ValueError("No valid JSON object found.")
-    return match.group()
-
-def identify_lab_equipment_from_bytes(image_bytes, mime_type="image/jpeg"):
-    GEMINI_API_KEY = get_gemini_key()
-    if not GEMINI_API_KEY:
-        return {"error": "GEMINI_API_KEY not set in environment."}
-
-    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": PROMPT},
-                    {"inline_data": {"mime_type": mime_type, "data": image_base64}}
-                ]
-            }
-        ]
-    }
-
-    r = requests.post(
-        f"{GEMINI_API_URL}?key={GEMINI_API_KEY}",
-        headers=headers,
-        json=payload,
-        timeout=60
+    raise RuntimeError(
+        "Could not determine package version. Ensure one of the following is present:\n"
+        " - __version__ in {pkg}/__init__.py\n"
+        " - a VERSION file at project root\n"
+        " - SETUPTOOLS_SCM_PRETEND_VERSION or PROJECT_VERSION env var (useful for CI builds)\n"
+        .format(pkg=package_name)
     )
-    print(f"req. response code {r.status_code}")
 
-    if r.status_code != 200:
-        return {"error": f"{r.status_code}: {r.text}"}
+# --- CONFIG: change these to match your project ---
+PACKAGE_NAME = "your_package"         # folder that contains __init__.py
+PROJECT_NAME = "your-project-name"    # package / distribution name
+# ------------------------------------------------
 
-    result = r.json()
-    try:
-        text_output = result["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception:
-        return {"error": "Unexpected response format from model.", "raw": result}
+VERSION = get_version(PACKAGE_NAME)
 
-    print("converting the content into JSON.....")
-    cleansed_json_str = clean_json(text_output)
-    print(cleansed_json_str)
-    try:
-        data = json.loads(cleansed_json_str)
-        print(f"data type of the json is {type(data)}")
-        print(data)
-        return data
-    except Exception:
-        return {"error": "Unexpected response format from model: JSON conversion failed." }
+here = Path(__file__).parent.resolve()
+long_description = ""
+readme = here / "README.md"
+if readme.exists():
+    long_description = readme.read_text(encoding="utf8")
 
-PROMPT = (
-    "You must analyze the provided image of a room and output ONLY valid JSON in the following structure: "
-    "{\"sustainability_score\": <number_1_to_10>, "
-    "\"items\": [{\"name\": \"<item_name>\", \"description\": \"<brief_description_max_10_words>\"}], "
-    "\"greener_alternatives\": [{\"name\": \"<item_name>\", \"alternative\": \"<alternative_suggestion_max_15_words>\"}], "
-    "\"temperature_regulation_suggestions\": [\"<suggestion_max_20_words>\"]}. "
-    "Tasks: 1) Identify all items in the room and describe each briefly (max 10 words). "
-    "2) Provide a sustainability score (1–10). "
-    "3) Suggest greener alternatives for each item (max 15 words per alternative). "
-    "4) Provide ways to improve temperature regulation (max 20 words per suggestion). "
-    "Output strictly valid JSON—no explanations, no extra text. Keep all responses very concise."
+setup(
+    name=PROJECT_NAME,
+    version=VERSION,
+    description="A short description of your project",
+    long_description=long_description,
+    long_description_content_type="text/markdown" if long_description else None,
+    packages=find_packages(exclude=("tests", "docs")),
+    include_package_data=True,
+    python_requires=">=3.8",
+    install_requires=[
+        "flask",
+        "requests",
+        "python-dotenv",
+        "Werkzeug",
+        "flask-cors",
+    ],
+    classifiers=[
+        "Programming Language :: Python :: 3",
+        "License :: OSI Approved :: MIT License",
+        "Operating System :: OS Independent",
+    ],
+    entry_points={
+        "console_scripts": [
+            # example: "run-my-app = your_package.app:main"
+        ]
+    },
 )
-
-@app.route('/')
-def index():
-    return render_template('index.html')
-
-@app.post("/api/identify")
-def identify_api():
-    if 'images' not in request.files:
-        return jsonify({"error": "No images provided. Use field name 'images'."}), 400
-
-    files = request.files.getlist('images')
-    results = []
-
-    for idx, f in enumerate(files):
-        filename = secure_filename(f.filename or f"image_{idx}.jpg")
-        if not filename:
-            results.append({"index": idx, "filename": None, "error": "Empty filename."})
-            continue
-
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "jpg"
-        mime = "image/jpeg"
-        if ext in ("png",): mime = "image/png"
-        if ext in ("webp",): mime = "image/webp"
-
-        try:
-            image_bytes = f.read()
-            if not image_bytes:
-                results.append({"index": idx, "filename": filename, "error": "Empty file."})
-                continue
-
-            out = identify_lab_equipment_from_bytes(image_bytes, mime)
-            out.update({"index": idx, "filename": filename})
-            results.append(out)
-        except Exception as e:
-            results.append({"index": idx, "filename": filename, "error": str(e)})
-
-    return jsonify({"results": results})
-
-if __name__ == "__main__":
-    CORS(app, resources={r"/api/*": {"origins": "*"}})
-    print("Starting Flask server on http://localhost:5000")
-    app.run(host="0.0.0.0", port=5000, debug=True)
