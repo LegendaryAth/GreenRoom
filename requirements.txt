@@ -2,3 +2,4 @@ Flask
 gunicorn
 requests
 dotenv
+flask_cors
