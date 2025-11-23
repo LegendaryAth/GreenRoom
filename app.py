@@ -1,115 +1,141 @@
-# setup.py - auto-detect package + import-safe version resolution
 import os
+import base64
+import requests
+import json
 import re
-from pathlib import Path
-from setuptools import setup, find_packages
+from dotenv import load_dotenv
+from flask import Flask, request, jsonify, render_template
+from werkzeug.utils import secure_filename
+from flask_cors import CORS
 
-ROOT = Path(__file__).parent.resolve()
+# load env but DON'T raise at import-time
+load_dotenv()
 
-def detect_package_name():
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = '/tmp'
+app.config['MAX_CONTENT_LENGTH'] = 15 * 1024 * 1024
+
+def get_gemini_key():
     """
-    Auto-detect the package directory by looking for folders that contain __init__.py
-    Excludes common non-package dirs.
-    Returns the first candidate or raises if none found.
+    Lazy retrieval of GEMINI_API_KEY. Returns None if not set.
+    This avoids raising at import-time during packaging/build steps.
     """
-    exclude = {"tests", "docs", ".github", ".venv", "venv", "__pycache__"}
-    candidates = []
-    for p in ROOT.iterdir():
-        if p.is_dir() and p.name not in exclude:
-            if (p / "__init__.py").exists():
-                candidates.append(p.name)
-    if not candidates:
-        # also try nested packages (src layout)
-        src = ROOT / "src"
-        if src.exists():
-            for p in src.iterdir():
-                if p.is_dir() and (p / "__init__.py").exists():
-                    candidates.append(p.name)
-    if not candidates:
-        raise RuntimeError("Could not auto-detect package folder. Ensure a package folder with __init__.py exists.")
-    # choose the first one (common case: single package)
-    return candidates[0]
+    return os.getenv("GEMINI_API_KEY")
 
-def read_version_from_init(package_name):
-    init_path = ROOT / package_name / "__init__.py"
-    if not init_path.exists():
-        # try src layout
-        init_path = ROOT / "src" / package_name / "__init__.py"
-        if not init_path.exists():
-            return None
-    text = init_path.read_text(encoding="utf8")
-    m = re.search(r"^__version__\s*=\s*['\"]([^'\"]+)['\"]", text, re.M)
-    if m:
-        return m.group(1)
-    return None
+def clean_json(text_output):
+    # Remove markdown code fences like ```json  ``` or ```JSON  ```
+    cleaned = re.sub(r"```(?:json|JSON)?", "", text_output).strip()
+    cleaned = cleaned.replace("```", "").strip()
 
-def get_version():
-    """
-    Acquire a version at build time without importing package.
-    Order:
-      1) parse __version__ from package/__init__.py
-      2) read VERSION file
-      3) env vars SETUPTOOLS_SCM_PRETEND_VERSION or PROJECT_VERSION
-    """
-    pkg = detect_package_name()
-    v = read_version_from_init(pkg)
-    if v:
-        return v
+    # Extract JSON object only
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if not match:
+        raise ValueError("No valid JSON object found.")
+    
+    json_str = match.group()
+    return json_str
 
-    version_file = ROOT / "VERSION"
-    if version_file.exists():
-        v = version_file.read_text(encoding="utf8").strip()
-        if v:
-            return v
+def identify_lab_equipment_from_bytes(image_bytes, mime_type="image/jpeg"):
+    GEMINI_API_KEY = get_gemini_key()
+    if not GEMINI_API_KEY:
+        # return a clear runtime error rather than crash import/build
+        return {"error": "GEMINI_API_KEY not set in environment (set it in Render dashboard or .env)."}
 
-    env_version = os.environ.get("SETUPTOOLS_SCM_PRETEND_VERSION") or os.environ.get("PROJECT_VERSION")
-    if env_version:
-        return env_version
+    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
 
-    # final helpful message with debugging hints
-    raise RuntimeError(
-        "Could not determine package version for build.\n"
-        "Detected package candidates: {}\n"
-        "Ensure one of:\n"
-        "  - __version__ = 'x.y.z' in <package>/__init__.py\n"
-        "  - a VERSION file at project root\n"
-        "  - SETUPTOOLS_SCM_PRETEND_VERSION or PROJECT_VERSION env var\n".format(
-            ", ".join([p.name for p in ROOT.iterdir() if (p.is_dir() and (p / '__init__.py').exists())])
-        )
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": PROMPT},
+                    {"inline_data": {"mime_type": mime_type, "data": image_base64}}
+                ]
+            }
+        ]
+    }
+
+    r = requests.post(
+        f"{GEMINI_API_URL}?key={GEMINI_API_KEY}",
+        headers=headers,
+        json=payload,
+        timeout=60
     )
+    print(f"req. response code {r.status_code}")
 
-# Attempt to detect package name now (used below)
-try:
-    PACKAGE_NAME = detect_package_name()
-except Exception:
-    PACKAGE_NAME = None
+    if r.status_code != 200:
+        return {"error": f"{r.status_code}: {r.text}"}
 
-VERSION = get_version()
+    result = r.json()
+    try:
+        text_output = result["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception:
+        return {"error": "Unexpected response format from model.", "raw": result}
 
-long_description = ""
-readme = ROOT / "README.md"
-if readme.exists():
-    long_description = readme.read_text(encoding="utf8")
+    print("converting the content into JSON.....")
+    cleansed_json_str = clean_json(text_output)
+    print(cleansed_json_str)
+    try:
+        data = json.loads(cleansed_json_str)
+        print(f"data type of the json is {type(data)}")
+        print(data)
+        return data
+    except Exception:
+        return {"error": "Unexpected response format from model: JSON conversion failed." }
 
-setup(
-    name=PACKAGE_NAME or "my_project",
-    version=VERSION,
-    description="Your project description",
-    long_description=long_description,
-    long_description_content_type="text/markdown" if long_description else None,
-    packages=find_packages(where=".", exclude=("tests", "docs")),
-    include_package_data=True,
-    python_requires=">=3.8",
-    install_requires=[
-        "flask",
-        "requests",
-        "python-dotenv",
-        "Werkzeug",
-        "flask-cors",
-    ],
-    classifiers=[
-        "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: MIT License",
-        "Operating System :: OS Independent",
-    ],
+PROMPT = (
+    "You must analyze the provided image of a room and output ONLY valid JSON in the following structure: "
+    "{\"sustainability_score\": <number_1_to_10>, "
+    "\"items\": [{\"name\": \"<item_name>\", \"description\": \"<brief_description_max_10_words>\"}], "
+    "\"greener_alternatives\": [{\"name\": \"<item_name>\", \"alternative\": \"<alternative_suggestion_max_15_words>\"}], "
+    "\"temperature_regulation_suggestions\": [\"<suggestion_max_20_words>\"]}. "
+    "Tasks: 1) Identify all items in the room and describe each briefly (max 10 words). "
+    "2) Provide a sustainability score (1–10). "
+    "3) Suggest greener alternatives for each item (max 15 words per alternative). "
+    "4) Provide ways to improve temperature regulation (max 20 words per suggestion). "
+    "Output strictly valid JSON—no explanations, no extra text. Keep all responses very concise."
 )
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.post("/api/identify")
+def identify_api():
+    if 'images' not in request.files:
+        return jsonify({"error": "No images provided. Use field name 'images'."}), 400
+
+    files = request.files.getlist('images')
+    results = []
+
+    for idx, f in enumerate(files):
+        filename = secure_filename(f.filename or f"image_{idx}.jpg")
+        if not filename:
+            results.append({"index": idx, "filename": None, "error": "Empty filename."})
+            continue
+
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "jpg"
+        mime = "image/jpeg"
+        if ext in ("png",): mime = "image/png"
+        if ext in ("webp",): mime = "image/webp"
+
+        try:
+            image_bytes = f.read()
+            if not image_bytes:
+                results.append({"index": idx, "filename": filename, "error": "Empty file."})
+                continue
+
+            out = identify_lab_equipment_from_bytes(image_bytes, mime)
+            out.update({"index": idx, "filename": filename})
+            results.append(out)
+        except Exception as e:
+            results.append({"index": idx, "filename": filename, "error": str(e)})
+
+    return jsonify({"results": results})
+
+if __name__ == "__main__":
+    CORS(app, resources={r"/api/*": {"origins": "*"}})
+    print("Starting Flask server on http://localhost:5000")
+    app.run(host="0.0.0.0", port=5000, debug=True)
