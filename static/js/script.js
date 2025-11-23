@@ -1,4 +1,4 @@
-const API_URL = "http://localhost:5000/api/identify"; 
+const API_URL = "/api/identify"; 
 
 const $ = (q, ctx=document) => ctx.querySelector(q);
 const $$ = (q, ctx=document) => Array.from(ctx.querySelectorAll(q));
