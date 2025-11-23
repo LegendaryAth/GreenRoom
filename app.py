@@ -1,67 +1,103 @@
-# setup.py - robust, import-safe version resolution for builds
+# setup.py - auto-detect package + import-safe version resolution
 import os
 import re
 from pathlib import Path
 from setuptools import setup, find_packages
 
-def get_version(package_name="your_package"):
+ROOT = Path(__file__).parent.resolve()
+
+def detect_package_name():
     """
-    Try to obtain version reliably at build-time without importing the package.
+    Auto-detect the package directory by looking for folders that contain __init__.py
+    Excludes common non-package dirs.
+    Returns the first candidate or raises if none found.
+    """
+    exclude = {"tests", "docs", ".github", ".venv", "venv", "__pycache__"}
+    candidates = []
+    for p in ROOT.iterdir():
+        if p.is_dir() and p.name not in exclude:
+            if (p / "__init__.py").exists():
+                candidates.append(p.name)
+    if not candidates:
+        # also try nested packages (src layout)
+        src = ROOT / "src"
+        if src.exists():
+            for p in src.iterdir():
+                if p.is_dir() and (p / "__init__.py").exists():
+                    candidates.append(p.name)
+    if not candidates:
+        raise RuntimeError("Could not auto-detect package folder. Ensure a package folder with __init__.py exists.")
+    # choose the first one (common case: single package)
+    return candidates[0]
+
+def read_version_from_init(package_name):
+    init_path = ROOT / package_name / "__init__.py"
+    if not init_path.exists():
+        # try src layout
+        init_path = ROOT / "src" / package_name / "__init__.py"
+        if not init_path.exists():
+            return None
+    text = init_path.read_text(encoding="utf8")
+    m = re.search(r"^__version__\s*=\s*['\"]([^'\"]+)['\"]", text, re.M)
+    if m:
+        return m.group(1)
+    return None
+
+def get_version():
+    """
+    Acquire a version at build time without importing package.
     Order:
       1) parse __version__ from package/__init__.py
-      2) read VERSION file at repo root
-      3) read SETUPTOOLS_SCM_PRETEND_VERSION env var (useful in CI)
+      2) read VERSION file
+      3) env vars SETUPTOOLS_SCM_PRETEND_VERSION or PROJECT_VERSION
     """
-    root = Path(__file__).parent.resolve()
+    pkg = detect_package_name()
+    v = read_version_from_init(pkg)
+    if v:
+        return v
 
-    # 1) parse from package __init__.py
-    init_path = root / package_name / "__init__.py"
-    if init_path.exists():
-        text = init_path.read_text(encoding="utf8")
-        m = re.search(r"^__version__\s*=\s*['\"]([^'\"]+)['\"]", text, re.M)
-        if m:
-            return m.group(1)
-
-    # 2) fallback to VERSION file in repo root
-    version_file = root / "VERSION"
+    version_file = ROOT / "VERSION"
     if version_file.exists():
-        version = version_file.read_text(encoding="utf8").strip()
-        if version:
-            return version
+        v = version_file.read_text(encoding="utf8").strip()
+        if v:
+            return v
 
-    # 3) fallback to env var (useful in CI/Render when .git is missing)
     env_version = os.environ.get("SETUPTOOLS_SCM_PRETEND_VERSION") or os.environ.get("PROJECT_VERSION")
     if env_version:
         return env_version
 
+    # final helpful message with debugging hints
     raise RuntimeError(
-        "Could not determine package version. Ensure one of the following is present:\n"
-        " - __version__ in {pkg}/__init__.py\n"
-        " - a VERSION file at project root\n"
-        " - SETUPTOOLS_SCM_PRETEND_VERSION or PROJECT_VERSION env var (useful for CI builds)\n"
-        .format(pkg=package_name)
+        "Could not determine package version for build.\n"
+        "Detected package candidates: {}\n"
+        "Ensure one of:\n"
+        "  - __version__ = 'x.y.z' in <package>/__init__.py\n"
+        "  - a VERSION file at project root\n"
+        "  - SETUPTOOLS_SCM_PRETEND_VERSION or PROJECT_VERSION env var\n".format(
+            ", ".join([p.name for p in ROOT.iterdir() if (p.is_dir() and (p / '__init__.py').exists())])
+        )
     )
 
-# --- CONFIG: change these to match your project ---
-PACKAGE_NAME = "your_package"         # folder that contains __init__.py
-PROJECT_NAME = "your-project-name"    # package / distribution name
-# ------------------------------------------------
+# Attempt to detect package name now (used below)
+try:
+    PACKAGE_NAME = detect_package_name()
+except Exception:
+    PACKAGE_NAME = None
 
-VERSION = get_version(PACKAGE_NAME)
+VERSION = get_version()
 
-here = Path(__file__).parent.resolve()
 long_description = ""
-readme = here / "README.md"
+readme = ROOT / "README.md"
 if readme.exists():
     long_description = readme.read_text(encoding="utf8")
 
 setup(
-    name=PROJECT_NAME,
+    name=PACKAGE_NAME or "my_project",
     version=VERSION,
-    description="A short description of your project",
+    description="Your project description",
     long_description=long_description,
     long_description_content_type="text/markdown" if long_description else None,
-    packages=find_packages(exclude=("tests", "docs")),
+    packages=find_packages(where=".", exclude=("tests", "docs")),
     include_package_data=True,
     python_requires=">=3.8",
     install_requires=[
@@ -76,9 +112,4 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
-    entry_points={
-        "console_scripts": [
-            # example: "run-my-app = your_package.app:main"
-        ]
-    },
 )
